@@ -4,6 +4,18 @@ A trading exchange written from scratch in C++26, built over eight weeks for the
 
 Client threads send orders. One engine thread owns the book and matches them. Nothing locks the book.
 
+## What is in here
+
+| File | What it does |
+|---|---|
+| `mem_pool.h` | Fixed size memory pool. Grabs one block at startup so no order ever hits the heap. |
+| `order.h` | One order: id, client, ticker, side, type, price, size. |
+| `trade.h` | What comes out when two orders match. |
+| `order_book.h` / `.cpp` | The book. Add, cancel, update, disconnect, TTL expiry, matching. |
+| `lf_queue.h` | Lock free queue. Many client threads push, one engine thread pops. No mutex. |
+| `exchange_main.cpp` | Runs it. Spins up client threads, waits for Ctrl+C. |
+| `mem_pool_test.cpp`, `order_test.cpp`, `order_book_test.cpp`, `lf_queue_test.cpp` | The tests. |
+
 ## Run it
 
 You need Bazel 8.5.1. Version 9 does not work with googletest yet, which is why `.bazelversion` pins it.
