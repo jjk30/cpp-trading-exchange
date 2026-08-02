@@ -26,14 +26,16 @@ public:
           Side side,
           OrderType type,
           int64_t price,
-          uint64_t size) noexcept
+          uint64_t size,
+          uint64_t timestamp = 0) noexcept
         : order_id_(order_id),
           client_id_(client_id),
           ticker_(std::move(ticker)),
           side_(side),
           type_(type),
           price_(price),
-          size_(size)
+          size_(size),
+          timestamp_(timestamp)
     {
     }
 
@@ -44,6 +46,7 @@ public:
     OrderType type() const noexcept { return type_; }
     int64_t price() const noexcept { return price_; }
     uint64_t size() const noexcept { return size_; }
+    uint64_t timestamp() const noexcept { return timestamp_; }
 
     // matching engine shrinks this when the order is partially filled
     void set_size(uint64_t size) noexcept { size_ = size; }
@@ -70,4 +73,5 @@ private:
     OrderType type_;
     int64_t price_; // in ticks/cents, never a double
     uint64_t size_;
+    uint64_t timestamp_;
 };

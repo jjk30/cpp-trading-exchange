@@ -14,6 +14,7 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
 cc_library(
     name = "order",
     hdrs = ["order.h"],
@@ -28,8 +29,10 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
 cc_library(
     name = "order_book",
+    srcs = ["order_book.cpp"],
     hdrs = ["order_book.h"],
     deps = [
         ":mem_pool",
