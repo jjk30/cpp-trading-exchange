@@ -65,6 +65,8 @@ cc_binary(
     srcs = ["exchange_main.cpp"],
     deps = [
         ":lf_queue",
+        ":md_book",
+        ":md_message",
         ":order",
         ":order_book",
     ],
