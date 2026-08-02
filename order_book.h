@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <list>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -28,7 +29,18 @@ public:
     // remove an order by id. returns false if the id isn't in the book.
     bool cancel(uint64_t order_id);
 
+    // change an order's size. shrinking keeps its place in the queue,
+    // growing sends it to the back. size 0 means cancel.
+    bool update(uint64_t order_id, uint64_t new_size);
+
     std::string toString() const;
+
+    // best prices. empty book -> nullopt, because 0 is a real price
+    std::optional<int64_t> best_bid() const;
+    std::optional<int64_t> best_ask() const;
+
+    // gap between the two. needs both sides to exist
+    std::optional<int64_t> spread() const;
 
     std::size_t order_count() const noexcept { return index_.size(); }
     std::size_t bid_levels() const noexcept { return bids_.size(); }
