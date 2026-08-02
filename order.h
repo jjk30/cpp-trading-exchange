@@ -27,7 +27,8 @@ public:
           OrderType type,
           int64_t price,
           uint64_t size,
-          uint64_t timestamp = 0) noexcept
+          uint64_t timestamp = 0,
+          uint64_t ttl = 0) noexcept
         : order_id_(order_id),
           client_id_(client_id),
           ticker_(std::move(ticker)),
@@ -35,7 +36,8 @@ public:
           type_(type),
           price_(price),
           size_(size),
-          timestamp_(timestamp)
+          timestamp_(timestamp),
+          ttl_(ttl)
     {
     }
 
@@ -47,9 +49,25 @@ public:
     int64_t price() const noexcept { return price_; }
     uint64_t size() const noexcept { return size_; }
     uint64_t timestamp() const noexcept { return timestamp_; }
+    uint64_t ttl() const noexcept { return ttl_; }
 
     // matching engine shrinks this when the order is partially filled
     void set_size(uint64_t size) noexcept { size_ = size; }
+
+    // A ttl of 0 means this order has no deadline and waits forever.
+    bool has_deadline() const noexcept { return ttl_ > 0; }
+
+    // The moment this order goes stale.
+    // Only meaningful when has_deadline() is true.
+    uint64_t expires_at() const noexcept { return timestamp_ + ttl_; }
+
+    // Is this order past its deadline at time now?
+    // Uses >= so an order with ttl 100 placed at 0 is dead at exactly 100,
+    // not one tick later. Pick one and be consistent.
+    bool is_expired(uint64_t now) const noexcept
+    {
+        return has_deadline() && now >= expires_at();
+    }
 
     std::string toString() const
     {
@@ -74,4 +92,8 @@ private:
     int64_t price_; // in ticks/cents, never a double
     uint64_t size_;
     uint64_t timestamp_;
+
+    // How long this order is allowed to sit before it gets pulled.
+    // 0 means no limit, which is the normal case.
+    uint64_t ttl_;
 };

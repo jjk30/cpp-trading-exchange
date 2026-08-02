@@ -25,6 +25,7 @@ public:
     // First it tries to trade against the other side of the book.
     // Whatever is left over sits in the book and waits, unless it is a
     // market order, because market orders never wait.
+    // ttl is how long the order may sit before it goes stale. 0 means forever.
     // Returns every trade that happened. Empty vector means nothing traded.
     std::vector<Trade> add(uint64_t order_id,
                            uint64_t client_id,
@@ -33,7 +34,8 @@ public:
                            OrderType type,
                            int64_t price,
                            uint64_t size,
-                           uint64_t timestamp = 0);
+                           uint64_t timestamp = 0,
+                           uint64_t ttl = 0);
 
     // Pull an order out of the book.
     // Returns false if we have never seen that id.
@@ -50,6 +52,17 @@ public:
     // they can no longer see or cancel.
     // Returns how many orders were removed.
     std::size_t disconnect(uint64_t client_id);
+
+    // Throw out every order whose deadline has passed by time now.
+    // The book has no clock of its own, so the caller decides what now means.
+    // That also makes this testable without waiting around.
+    // Returns how many orders were removed.
+    std::size_t purge_expired(uint64_t now);
+
+    // The soonest deadline in the whole book.
+    // Nothing if no order has a deadline. A scheduler would use this to
+    // work out when it next needs to call purge_expired.
+    std::optional<uint64_t> next_expiry() const;
 
     // How many orders this client currently has resting.
     std::size_t orders_for_client(uint64_t client_id) const;
@@ -118,7 +131,8 @@ private:
               OrderType type,
               int64_t price,
               uint64_t size,
-              uint64_t timestamp);
+              uint64_t timestamp,
+              uint64_t ttl);
 
     // Take a fully eaten resting order out of the book and give its
     // memory back to the pool.
@@ -128,6 +142,10 @@ private:
     // If that was the client's last order, drop the client entry too, so
     // the map does not slowly fill with empty sets.
     void forget_client_order(uint64_t client_id, uint64_t order_id);
+
+    // Drop one order from the expiry map.
+    // If nothing else dies at that moment, drop the moment too.
+    void forget_expiry(const Order *order);
 
     static std::string level_to_string(int64_t price, const PriceLevel &level);
 
@@ -151,4 +169,10 @@ private:
     // Without this, disconnect() would have to walk the entire book looking
     // for orders belonging to one person.
     std::unordered_map<uint64_t, std::unordered_set<uint64_t>> client_orders_;
+
+    // Deadline to the order ids dying at that moment, soonest first.
+    // Sorted, so purge_expired only looks at the front instead of checking
+    // every order in the book.
+    // Only orders with a real ttl show up here.
+    std::map<uint64_t, std::unordered_set<uint64_t>> expiry_;
 };

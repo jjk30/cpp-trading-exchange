@@ -649,3 +649,149 @@ TEST(OrderBookDisconnect, SurvivesUpSize)
     EXPECT_EQ(book.disconnect(100), 2u);
     EXPECT_EQ(book.order_count(), 0u);
 }
+TEST(OrderBookTTL, NoTtlMeansNeverExpires)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 0, 0);
+
+    EXPECT_EQ(book.purge_expired(999999), 0u);
+    EXPECT_EQ(book.order_count(), 1u);
+    EXPECT_FALSE(book.next_expiry().has_value());
+}
+
+TEST(OrderBookTTL, ExpiresExactlyOnDeadline)
+{
+    OrderBook book(10);
+
+    // placed at 1000, lives 100, so it dies at 1100
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 1000, 100);
+
+    ASSERT_TRUE(book.next_expiry().has_value());
+    EXPECT_EQ(book.next_expiry().value(), 1100u);
+
+    EXPECT_EQ(book.purge_expired(1099), 0u);
+    EXPECT_EQ(book.order_count(), 1u);
+
+    EXPECT_EQ(book.purge_expired(1100), 1u);
+    EXPECT_EQ(book.order_count(), 0u);
+}
+
+TEST(OrderBookTTL, OnlyTakesTheOnesPastTheirTime)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 0, 100);
+    book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 9999, 5, 0, 200);
+    book.add(3, 100, "AAPL", Side::BUY, OrderType::LIMIT, 9998, 5, 0, 300);
+
+    EXPECT_EQ(book.purge_expired(200), 2u);
+    EXPECT_EQ(book.order_count(), 1u);
+
+    // only the 300 one is left
+    ASSERT_TRUE(book.next_expiry().has_value());
+    EXPECT_EQ(book.next_expiry().value(), 300u);
+}
+
+TEST(OrderBookTTL, ExpiredAndForeverCanShareTheBook)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 0, 50);
+    book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 7, 0, 0);
+
+    EXPECT_EQ(book.purge_expired(100), 1u);
+
+    // the one with no deadline is untouched
+    EXPECT_EQ(book.order_count(), 1u);
+    EXPECT_NE(book.toString().find("10000 : 7"), std::string::npos);
+}
+
+TEST(OrderBookTTL, SeveralOrdersDyingAtTheSameMoment)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 0, 100);
+    book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 50, 50);
+
+    // both land on 100 exactly
+    ASSERT_TRUE(book.next_expiry().has_value());
+    EXPECT_EQ(book.next_expiry().value(), 100u);
+
+    EXPECT_EQ(book.purge_expired(100), 2u);
+    EXPECT_EQ(book.order_count(), 0u);
+    EXPECT_FALSE(book.next_expiry().has_value());
+}
+
+TEST(OrderBookTTL, CancelClearsTheDeadline)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 0, 100);
+    EXPECT_TRUE(book.cancel(1));
+
+    // gone by hand, so there is nothing left to expire
+    EXPECT_FALSE(book.next_expiry().has_value());
+    EXPECT_EQ(book.purge_expired(999), 0u);
+}
+
+TEST(OrderBookTTL, FilledOrderClearsTheDeadline)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5, 0, 100);
+    book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 5);
+
+    // traded away, so its deadline must go with it
+    EXPECT_FALSE(book.next_expiry().has_value());
+    EXPECT_EQ(book.purge_expired(999), 0u);
+}
+
+TEST(OrderBookTTL, UpSizeDoesNotResetTheClock)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 0, 100);
+    EXPECT_TRUE(book.update(1, 50));
+
+    // you lose your queue spot, but you do not get a fresh lifetime
+    ASSERT_TRUE(book.next_expiry().has_value());
+    EXPECT_EQ(book.next_expiry().value(), 100u);
+    EXPECT_EQ(book.purge_expired(100), 1u);
+}
+
+TEST(OrderBookTTL, PurgingTwiceIsHarmless)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 0, 100);
+
+    EXPECT_EQ(book.purge_expired(200), 1u);
+    EXPECT_EQ(book.purge_expired(200), 0u);
+    EXPECT_EQ(book.order_count(), 0u);
+}
+
+TEST(OrderBookTTL, DisconnectClearsDeadlinesToo)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5, 0, 100);
+    book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 9999, 5, 0, 200);
+
+    EXPECT_EQ(book.disconnect(100), 2u);
+    EXPECT_FALSE(book.next_expiry().has_value());
+}
+
+TEST(OrderBookTTL, PartiallyFilledOrderKeepsItsDeadline)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 10, 0, 100);
+    book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 4);
+
+    // 6 still resting, and it is still on the same clock
+    ASSERT_TRUE(book.next_expiry().has_value());
+    EXPECT_EQ(book.next_expiry().value(), 100u);
+    EXPECT_EQ(book.purge_expired(100), 1u);
+    EXPECT_EQ(book.order_count(), 0u);
+}
