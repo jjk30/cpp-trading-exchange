@@ -2,25 +2,25 @@
 
 A trading exchange written from scratch in C++26, built over eight weeks for the Build Fellowship.
 
-Client threads send orders. One engine thread owns the book and matches them. Nothing locks the book. Clients never read the book either — they rebuild their own copy from a market data feed.
+Client threads send orders. One engine thread owns the book and matches them. Nothing locks the book. Clients never read the book either, they rebuild their own copy from a market data feed.
 
 ## What is in here
 
 | File | What it does |
 |---|---|
-| `mem_pool.h` | Fixed size memory pool. Grabs one block at startup so no order ever hits the heap. |
+| `mem_pool.h` | Fixed size memory pool. One block at startup, so no order ever hits the heap. |
 | `order.h` | One order: id, client, ticker, side, type, price, size. |
 | `trade.h` | What comes out when two orders match. |
 | `order_book.h` / `.cpp` | The book. Add, cancel, update, disconnect, TTL expiry, matching. |
-| `lf_queue.h` | Lock free queue. Used both ways: many clients push orders in, and the engine pushes market data out. |
+| `lf_queue.h` | Lock free queue. Clients push orders in, the engine pushes market data out. |
 | `md_message.h` | One market data event. Added, executed, or cancelled, with a sequence number. |
 | `md_book.h` | A client's own copy of the book, rebuilt from the feed alone. |
-| `exchange_main.cpp` | Runs it. Client threads, engine thread, market data, waits for Ctrl+C. |
-| `mem_pool_test.cpp`, `order_test.cpp`, `order_book_test.cpp`, `lf_queue_test.cpp`, `md_book_test.cpp` | The tests. |
+| `exchange_main.cpp` | Runs it. Client threads, engine thread, market data feed. |
+| `*_test.cpp` | The tests. Five targets. |
 
 ## Run it
 
-You need Bazel 8.5.1. Version 9 does not work with googletest yet, which is why `.bazelversion` pins it.
+Needs Bazel 8.5.1. Version 9 does not work with googletest yet, which is why `.bazelversion` pins it.
 
 ```bash
 git clone https://github.com/jjk30/cpp-trading-exchange.git
@@ -30,21 +30,21 @@ bazel test //...           # 5 test targets
 bazel run //:exchange_main # Ctrl+C to stop
 ```
 
-## Step 1: Stop the orders from touching the heap
+## Step 1: Keep orders off the heap
 
-**What I did.** Wrote `MemPool<T>`, a fixed size memory pool.
+**What.** `MemPool<T>`, a fixed size memory pool.
 
-**How.** Ask the OS for one block of memory at startup and never ask again. Slots are handed out from that block. Free slots are tracked as a stack of indices, so taking one out or putting one back is a single push or pop. Objects are built in place with `std::construct_at` and torn down with `std::destroy_at`.
+**How.** Ask the OS for one block at startup and never ask again. Free slots are a stack of indices, so handing one out or taking it back is a single push or pop. Objects are built in place with `std::construct_at`, torn down with `std::destroy_at`.
 
-**What it got me.** Adding an order never calls `new`. No allocator, no lock inside malloc, no surprise pause in the middle of a match. Every slot is next to the last one, so the CPU cache actually helps.
+**Got me.** Adding an order never calls `new`. No allocator, no lock inside malloc, no pause in the middle of a match. Slots sit next to each other, so the cache helps.
 
 19 tests, including a 1000 round stress loop.
 
-Files: `mem_pool.h`, `mem_pool_test.cpp`
+Files: `mem_pool.h`
 
 ## Step 2: Build the order book
 
-**What I did.** Wrote `Order` and `OrderBook` with add, cancel, and toString.
+**What.** `Order` and `OrderBook` with add, cancel, toString.
 
 **How.** Three containers, because the book has two jobs that pull in different directions.
 
@@ -54,96 +54,101 @@ Files: `mem_pool.h`, `mem_pool_test.cpp`
 | `std::map` for asks | best sell price in O(1) |
 | `std::unordered_map` by order id | cancel by id in O(1) |
 
-Orders at the same price wait in a `std::list`, first in first filled. The id index stores an iterator pointing straight at the order, so cancel is one jump instead of a scan.
+Orders at the same price wait in a `std::list`, first in first filled. The id index stores an iterator pointing straight at the order, so cancel is one jump, not a scan.
 
-**What it got me.** Both of the book's hot paths are constant time. List and not vector matters here: erasing from the middle of a list is O(1) and does not break the iterators either side of it, which is the only reason the stored iterator stays valid.
+**Got me.** Both hot paths are constant time. List and not vector matters: erasing from the middle of a list is O(1) and does not invalidate the iterators either side of it, which is the only reason the stored iterator stays valid.
 
-One bug worth remembering. Bids and asks started as different map types, one sorted backwards. A ternary cannot return two different types, so it would not compile. Fix was to sort both low to high and read bids from the back with `rbegin()`.
+11 tests.
 
-3 tests for Order, 8 for the book at this point.
-
-Files: `order.h`, `order_book.h`, `order_test.cpp`, `order_book_test.cpp`
+Files: `order.h`, `order_book.h`
 
 ## Step 3: Make it behave like a real venue
 
-**What I did.** Added everything a book needs beyond add and cancel, plus a matching engine.
+**What.** Everything a book needs beyond add and cancel, plus a matching engine.
 
 **How.**
 
-- `update` resizes a resting order. Smaller keeps its place in the queue. Larger loses it and goes to the back, which is what a real exchange does.
-- `disconnect` pulls every order belonging to one client. Needed a second index from client id to that client's order ids.
-- Orders carry a time to live and get purged when they expire.
-- Self trade prevention stops a client matching against itself.
-- The matching engine fills on price first, then time.
-
-Then I split the class into `order_book.h` and `order_book.cpp`, and measured coverage.
-
-**What it got me.** 83 tests passing, and coverage well past the 80 percent bar.
-
-| | |
+| Feature | Behaviour |
 |---|---|
-| Lines | 96.60 percent (9 missed of 265) |
+| `update` | Smaller keeps queue position. Larger goes to the back, same as a real exchange. |
+| `disconnect` | Pulls every order for one client. Needed a second index, client id to order ids. |
+| TTL | Orders carry an expiry and get purged. |
+| Self trade prevention | A client never matches against itself. |
+| Matching | Price first, then time. |
+
+Then split the class into `order_book.h` and `order_book.cpp`, and measured coverage.
+
+**Got me.** 83 tests and coverage well past the 80 percent bar.
+
+| Metric | Value |
+|---|---|
+| Lines | 96.60 percent |
 | Functions | 100 percent (22 of 22) |
 | Branches | 94.90 percent |
 
-The nine uncovered lines are defensive guards for states the class invariants already prevent. I left them in. Deleting a safety check to win a coverage point makes the code worse.
+The uncovered lines are defensive guards for states the class invariants already prevent. Deleting a safety check to win a coverage point makes the code worse.
 
-If you are on a Mac, note that `bazel coverage` finishes green but writes `LF:0` for every file, so the report comes out empty. I got the real numbers by building the test with clang directly and running `llvm-cov` on the profile.
+Mac note: `bazel coverage` finishes green but writes `LF:0` for every file. Real numbers came from building with clang directly and running `llvm-cov` on the profile.
 
 Files: `order_book.cpp`, `trade.h`
 
 ## Step 4: Let many clients in at once
 
-**What I did.** Wrote a lock free queue and a `main` that runs the whole exchange.
+**What.** A lock free queue and a `main` that runs the whole exchange.
 
-**How.** The obvious design is a mutex on the book, with every client thread matching under it. That is worse than it sounds. Clients block behind each other, one slow order stalls everybody, and a mutex is not fair, so submission order gets lost.
+**How.** The obvious design is a mutex on the book. Clients block behind each other, one slow order stalls everybody, and a mutex is not fair, so submission order is lost.
 
 So clients never touch the book. They push a request into `LFQueue` and go back to work. One engine thread pops and applies.
 
-The queue is a ring of slots. Each slot carries an atomic sequence number that works like a traffic light. A producer claims a slot with a compare and swap on the tail counter, writes into it, then flips the light green. The consumer only takes a slot whose light says it is its turn. Capacity is a power of two, so wrapping around is a bitmask instead of a modulo.
+The queue is a ring of slots. Each slot holds an atomic sequence number that acts like a traffic light. A producer claims a slot with a compare and swap on the tail counter, writes into it, then flips the light green. The consumer only takes a slot whose light says it is its turn. Capacity is a power of two, so wrapping is a bitmask, not a modulo.
 
-`exchange_main.cpp` builds the engine, spins a thread per client, and waits for Ctrl+C. The signal handler does nothing but flip an atomic flag, because that is all a handler can safely do.
+**Got me.** Client latency is just the enqueue, so a slow match cannot stall anyone else. And the queue is FIFO by arrival, so execution order is fixed instead of whatever the scheduler felt like. A mutex gives you neither.
 
-**What it got me.** Client latency is just the enqueue, so a slow match cannot stall anybody else. And because the queue is FIFO by arrival, execution happens in one fixed order instead of whatever the OS scheduler felt like. A mutex gives you neither.
+11 tests.
 
-Files: `lf_queue.h`, `lf_queue_test.cpp`, `exchange_main.cpp`
+Files: `lf_queue.h`, `exchange_main.cpp`
 
 ## Step 5: Let clients see the market
 
-**What I did.** Made the exchange broadcast every change to the book, so a client can rebuild the book without ever reading it.
+**What.** The exchange broadcasts every change to the book, so a client can rebuild it without ever reading it.
 
-**How.** Three message types, which is all Nasdaq's ITCH really needs:
+**How.** Three message types, which is all Nasdaq's ITCH really needs.
 
 | Message | What the client does |
 |---|---|
-| Added | put the order in, at the back of that price's queue |
-| Executed | shrink that order. If it hits zero, drop it |
-| Cancelled | drop that order |
+| Added | Put the order at the back of that price's queue |
+| Executed | Shrink that order. If it hits zero, drop it |
+| Cancelled | Drop that order |
 
-The book now reports what it changed. Every mutating method takes an optional `std::vector<MDMessage>*`, and pushes onto it as it works. Pass nothing and no messages are made, so every existing caller and test kept compiling untouched.
+Every mutating method takes an optional `std::vector<MDMessage>*` and pushes onto it as it works. Pass nothing and no messages are made, so every existing caller and test kept compiling untouched.
 
-Order entry is one MPSC queue. Market data is one SPSC queue per client — same `LFQueue`, just one producer instead of many. Nobody shares a market data queue, so nobody contends for one.
+Order entry is one MPSC queue. Market data is one SPSC queue per client, same `LFQueue`, one producer instead of many. Nobody shares a queue, so nobody contends for one.
 
-Every message carries a sequence number. If a client sees a number it did not expect, it knows it missed something and its book is now a guess, not a copy.
+Every message carries a sequence number. A client that sees an unexpected number knows its book is now a guess, not a copy.
 
-**What it got me.** Four client threads, 77,406 requests, 52,154 trades, 111,842 market data messages. All four clients rebuilt an 8,235 order book byte for byte, with zero drops and zero gaps.
+**Got me.** A live run with four client threads.
+
+| | |
+|---|---|
+| Requests | 77,406 |
+| Trades | 52,154 |
+| Market data messages | 111,842 |
+| Book rebuilt | 8,235 orders, all four clients, exact match |
+| Drops and gaps | 0 |
 
 Three decisions worth defending:
 
 - The engine uses `try_push`, never a blocking push. A slow subscriber loses a message and sees the gap in its sequence numbers. A matching engine that stalls because one client is slow is a broken exchange.
-- `emit` does not burn a sequence number when nobody is listening. Burning one would leave a phantom hole and make subscribers think they missed something.
-- Growing an order sends Cancelled then Added, not a modify message. The client does not need to know the queue priority rules — replaying those two lands the order exactly where the exchange put it.
+- `emit` does not burn a sequence number when nobody is listening. That would leave a phantom hole and make subscribers think they missed something.
+- Growing an order sends Cancelled then Added, not a modify message. The client does not need to know the queue priority rules, replaying those two lands the order exactly where the exchange put it.
 
-20 tests, which drive the real book through partial fills, sweeps, resizes, expiries and disconnects, then assert the rebuilt book prints identically.
+20 tests, driving the real book through partial fills, sweeps, resizes, expiries and disconnects, then asserting the rebuilt book prints identically.
 
-Files: `md_message.h`, `md_book.h`, `md_book_test.cpp`
+Files: `md_message.h`, `md_book.h`
 
-## What is still missing
+## Next
 
-- No latency numbers. Nothing here claims nanoseconds, and it should not until I have measured it.
-- No second implementation to compare against. A tick indexed array would be the obvious one.
-- The pool only covers the `Order` objects. `std::map` and `std::list` still allocate a node on every insert, so three of the four allocations per add are still there. That is the next real thing to fix.
-- No snapshot bootstrap. Every client here starts at sequence 1 and follows from the beginning. A client joining mid day would need to buffer the live feed, request a snapshot, and replay past it. Only the incremental half is built.
+Latency benchmarking, a tick indexed book to compare against, and snapshot bootstrap so a client can join mid session.
 
 ## Built with
 
