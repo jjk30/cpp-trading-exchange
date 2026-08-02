@@ -31,12 +31,19 @@ cc_test(
 )
 
 cc_library(
+    name = "trade",
+    hdrs = ["trade.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "order_book",
     srcs = ["order_book.cpp"],
     hdrs = ["order_book.h"],
     deps = [
         ":mem_pool",
         ":order",
+        ":trade",
     ],
     visibility = ["//visibility:public"],
 )

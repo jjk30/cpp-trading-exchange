@@ -9,7 +9,7 @@ namespace
     {
         OrderBook book(100);
 
-        EXPECT_TRUE(book.add(1, 10, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5));
+        book.add(1, 10, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
 
         EXPECT_EQ(book.order_count(), 1u);
         EXPECT_EQ(book.bid_levels(), 1u);
@@ -20,10 +20,19 @@ namespace
     {
         OrderBook book(100);
 
-        EXPECT_TRUE(book.add(1, 10, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5));
-        EXPECT_FALSE(book.add(1, 10, "AAPL", Side::BUY, OrderType::LIMIT, 10001, 7));
+        book.add(1, 10, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+        book.add(1, 10, "AAPL", Side::BUY, OrderType::LIMIT, 10001, 7);
 
         EXPECT_EQ(book.order_count(), 1u);
+    }
+
+    TEST(OrderBookTest, RejectsZeroSize)
+    {
+        OrderBook book(100);
+
+        book.add(1, 10, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 0);
+
+        EXPECT_EQ(book.order_count(), 0u);
     }
 
     TEST(OrderBookTest, SamePriceSharesOneLevel)
@@ -175,7 +184,6 @@ namespace
 
         EXPECT_TRUE(book.update(2, 3));
 
-        // still second in line, just smaller
         EXPECT_NE(book.toString().find("10000 : 5 3 9"), std::string::npos);
     }
 
@@ -201,7 +209,6 @@ namespace
 
         EXPECT_TRUE(book.update(2, 20));
 
-        // lost its spot, now last
         EXPECT_NE(book.toString().find("10000 : 5 9 20"), std::string::npos);
         EXPECT_EQ(book.order_count(), 3u);
     }
@@ -226,7 +233,6 @@ namespace
 
         EXPECT_TRUE(book.update(1, 50));
 
-        // if the saved iterator wasn't refreshed, this walks into a dead node
         EXPECT_TRUE(book.cancel(1));
         EXPECT_EQ(book.order_count(), 1u);
         EXPECT_TRUE(book.cancel(2));
@@ -243,6 +249,192 @@ namespace
         EXPECT_TRUE(book.update(1, 30));
 
         EXPECT_NE(book.toString().find("10002 : 6 30"), std::string::npos);
+    }
+
+    TEST(OrderBookMatch, NoTradeWhenPricesDontCross)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10005, 5);
+        const auto trades = book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+
+        EXPECT_TRUE(trades.empty());
+        EXPECT_EQ(book.order_count(), 2u);
+    }
+
+    TEST(OrderBookMatch, ExactFillClearsBothSides)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+        const auto trades = book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 5);
+
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].buy_order_id, 2u);
+        EXPECT_EQ(trades[0].sell_order_id, 1u);
+        EXPECT_EQ(trades[0].size, 5u);
+
+        // nothing left over on either side
+        EXPECT_EQ(book.order_count(), 0u);
+        EXPECT_EQ(book.ask_levels(), 0u);
+        EXPECT_EQ(book.bid_levels(), 0u);
+    }
+
+    TEST(OrderBookMatch, TradeHappensAtRestingPrice)
+    {
+        OrderBook book(10);
+
+        // seller asked 10000, buyer offered 10005.
+        // the seller waited, so the seller's price wins.
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10000, 5);
+        const auto trades = book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10005, 5);
+
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].price, 10000);
+    }
+
+    TEST(OrderBookMatch, SmallIncomingLeavesRestingBehind)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 10);
+        const auto trades = book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 4);
+
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].size, 4u);
+
+        // 6 still for sale, and the buyer is fully done
+        EXPECT_EQ(book.order_count(), 1u);
+        EXPECT_NE(book.toString().find("10002 : 6"), std::string::npos);
+    }
+
+    TEST(OrderBookMatch, BigIncomingRestsWithLeftover)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 3);
+        const auto trades = book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 10);
+
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].size, 3u);
+
+        // seller gone, buyer's leftover 7 now waits as a bid
+        EXPECT_EQ(book.ask_levels(), 0u);
+        EXPECT_EQ(book.order_count(), 1u);
+        ASSERT_TRUE(book.best_bid().has_value());
+        EXPECT_EQ(book.best_bid().value(), 10002);
+        EXPECT_NE(book.toString().find("10002 : 7"), std::string::npos);
+    }
+
+    TEST(OrderBookMatch, OldestRestingOrderFillsFirst)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+        book.add(2, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+
+        const auto trades = book.add(3, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 5);
+
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].sell_order_id, 1u);
+    }
+
+    TEST(OrderBookMatch, EatsCheapestAskFirst)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10003, 2);
+        book.add(2, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10001, 2);
+        book.add(3, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 2);
+
+        const auto trades = book.add(4, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 4);
+
+        ASSERT_EQ(trades.size(), 2u);
+        EXPECT_EQ(trades[0].price, 10001);
+        EXPECT_EQ(trades[1].price, 10002);
+
+        // 10003 was too expensive, so it survives
+        EXPECT_EQ(book.ask_levels(), 1u);
+        EXPECT_EQ(book.best_ask().value(), 10003);
+    }
+
+    TEST(OrderBookMatch, SellCrossesIntoBids)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+        const auto trades = book.add(2, 200, "AAPL", Side::SELL, OrderType::LIMIT, 9999, 5);
+
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].buy_order_id, 1u);
+        EXPECT_EQ(trades[0].sell_order_id, 2u);
+        EXPECT_EQ(trades[0].price, 10000);
+        EXPECT_EQ(book.order_count(), 0u);
+    }
+
+    TEST(OrderBookMatch, MarketOrderIgnoresPrice)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10001, 2);
+        book.add(2, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10009, 3);
+
+        // price 0 is meaningless for a market order. it takes whatever is there.
+        const auto trades = book.add(3, 200, "AAPL", Side::BUY, OrderType::MARKET, 0, 5);
+
+        ASSERT_EQ(trades.size(), 2u);
+        EXPECT_EQ(trades[0].price, 10001);
+        EXPECT_EQ(trades[1].price, 10009);
+        EXPECT_EQ(book.order_count(), 0u);
+    }
+
+    TEST(OrderBookMatch, MarketOrderNeverRests)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 3);
+
+        // wants 10 but only 3 exist. the other 7 are thrown away, not booked.
+        const auto trades = book.add(2, 200, "AAPL", Side::BUY, OrderType::MARKET, 0, 10);
+
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].size, 3u);
+        EXPECT_EQ(book.order_count(), 0u);
+        EXPECT_EQ(book.bid_levels(), 0u);
+    }
+
+    TEST(OrderBookMatch, MarketOrderOnEmptyBookDoesNothing)
+    {
+        OrderBook book(10);
+
+        const auto trades = book.add(1, 100, "AAPL", Side::BUY, OrderType::MARKET, 0, 5);
+
+        EXPECT_TRUE(trades.empty());
+        EXPECT_EQ(book.order_count(), 0u);
+    }
+
+    TEST(OrderBookMatch, CancelStillWorksAfterPartialFill)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 10);
+        book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 4);
+
+        // order 1 is still there with 6 left, so cancelling it must work
+        EXPECT_TRUE(book.cancel(1));
+        EXPECT_EQ(book.order_count(), 0u);
+    }
+
+    TEST(OrderBookMatch, FilledOrderIsForgotten)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+        book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 5);
+
+        // order 1 traded away completely, so the book should not know it
+        EXPECT_FALSE(book.cancel(1));
+        EXPECT_FALSE(book.update(1, 3));
     }
 
 } // namespace
