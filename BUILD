@@ -14,3 +14,35 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+cc_library(
+    name = "order",
+    hdrs = ["order.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "order_test",
+    srcs = ["order_test.cpp"],
+    deps = [
+        ":order",
+        "@googletest//:gtest_main",
+    ],
+)
+cc_library(
+    name = "order_book",
+    hdrs = ["order_book.h"],
+    deps = [
+        ":mem_pool",
+        ":order",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "order_book_test",
+    srcs = ["order_book_test.cpp"],
+    deps = [
+        ":order_book",
+        "@googletest//:gtest_main",
+    ],
+)
