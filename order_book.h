@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class OrderBook
@@ -43,6 +44,15 @@ public:
     // Making it bigger sends you to the back of the queue.
     // Setting it to 0 is the same as cancelling.
     bool update(uint64_t order_id, uint64_t new_size);
+
+    // A client dropped off. Pull every order they have out of the book.
+    // If we left them in, the client would keep getting filled on orders
+    // they can no longer see or cancel.
+    // Returns how many orders were removed.
+    std::size_t disconnect(uint64_t client_id);
+
+    // How many orders this client currently has resting.
+    std::size_t orders_for_client(uint64_t client_id) const;
 
     // Print the whole book as text. Handy for debugging and for tests.
     std::string toString() const;
@@ -114,6 +124,11 @@ private:
     // memory back to the pool.
     void remove_filled(Book &book, Book::iterator level_it, PriceLevel::iterator pos);
 
+    // Drop one order id from its client's list.
+    // If that was the client's last order, drop the client entry too, so
+    // the map does not slowly fill with empty sets.
+    void forget_client_order(uint64_t client_id, uint64_t order_id);
+
     static std::string level_to_string(int64_t price, const PriceLevel &level);
 
     // Where all Order objects actually live.
@@ -131,4 +146,9 @@ private:
     // Order id to its Location.
     // This is the only reason cancel() is fast instead of a full scan.
     std::unordered_map<uint64_t, Location> index_;
+
+    // Client id to every order id they own.
+    // Without this, disconnect() would have to walk the entire book looking
+    // for orders belonging to one person.
+    std::unordered_map<uint64_t, std::unordered_set<uint64_t>> client_orders_;
 };

@@ -20,6 +20,25 @@ bool OrderBook::crosses(Side side, int64_t incoming, int64_t resting)
     return incoming <= resting;
 }
 
+// An order is leaving the book, so its owner should stop claiming it.
+void OrderBook::forget_client_order(uint64_t client_id, uint64_t order_id)
+{
+    auto it = client_orders_.find(client_id);
+    if (it == client_orders_.end())
+    {
+        return;
+    }
+
+    it->second.erase(order_id);
+
+    // No orders left for this client, so drop the whole entry.
+    // Otherwise the map keeps growing with empty sets forever.
+    if (it->second.empty())
+    {
+        client_orders_.erase(it);
+    }
+}
+
 // A resting order got completely used up. Clean up everything pointing at it.
 void OrderBook::remove_filled(Book &book,
                               Book::iterator level_it,
@@ -27,8 +46,12 @@ void OrderBook::remove_filled(Book &book,
 {
     Order *filled = *pos;
 
-    // Forget the id first, while we can still read it off the object.
-    index_.erase(filled->order_id());
+    // Read the ids off the object while it is still alive.
+    const uint64_t order_id = filled->order_id();
+    const uint64_t client_id = filled->client_id();
+
+    index_.erase(order_id);
+    forget_client_order(client_id, order_id);
 
     // Hand the slot back so a future order can use it.
     pool_.deallocate(filled);
@@ -149,6 +172,9 @@ void OrderBook::rest(uint64_t order_id,
 
     // Write down where it went. std::prev(end()) is the node we just added.
     index_[order_id] = Location{side, price, std::prev(level.end())};
+
+    // And write down who owns it, so disconnect() can find it later.
+    client_orders_[client_id].insert(order_id);
 }
 
 std::vector<Trade> OrderBook::add(uint64_t order_id,
@@ -198,9 +224,12 @@ bool OrderBook::cancel(uint64_t order_id)
     auto level_it = book.find(loc.price);
     PriceLevel &level = level_it->second;
 
-    // Give the memory back first, then unlink the node.
-    // Doing it the other way round would lose the pointer.
-    pool_.deallocate(*loc.pos);
+    Order *order = *loc.pos;
+
+    // Read the owner off the object before the memory goes back to the pool.
+    forget_client_order(order->client_id(), order_id);
+
+    pool_.deallocate(order);
     level.erase(loc.pos);
 
     // An empty price level should not stay in the book.
@@ -251,6 +280,42 @@ bool OrderBook::update(uint64_t order_id, uint64_t new_size)
     loc.pos = std::prev(level.end());
 
     return true;
+}
+
+std::size_t OrderBook::disconnect(uint64_t client_id)
+{
+    auto it = client_orders_.find(client_id);
+    if (it == client_orders_.end())
+    {
+        return 0;
+    }
+
+    // Copy the ids out first.
+    // cancel() erases from this very set, and changing a container while
+    // looping over it is how you get a crash.
+    const std::vector<uint64_t> ids(it->second.begin(), it->second.end());
+
+    std::size_t removed = 0;
+    for (const uint64_t id : ids)
+    {
+        if (cancel(id))
+        {
+            ++removed;
+        }
+    }
+
+    return removed;
+}
+
+std::size_t OrderBook::orders_for_client(uint64_t client_id) const
+{
+    auto it = client_orders_.find(client_id);
+    if (it == client_orders_.end())
+    {
+        return 0;
+    }
+
+    return it->second.size();
 }
 
 std::string OrderBook::toString() const

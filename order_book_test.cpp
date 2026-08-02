@@ -531,4 +531,121 @@ namespace
         EXPECT_EQ(book.order_count(), 0u);
     }
 
-} // namespace
+}
+TEST(OrderBookDisconnect, UnknownClientRemovesNothing)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+
+    EXPECT_EQ(book.disconnect(999), 0u);
+    EXPECT_EQ(book.order_count(), 1u);
+}
+
+TEST(OrderBookDisconnect, RemovesAllOrdersForOneClient)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+    book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 9999, 5);
+    book.add(3, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10005, 5);
+
+    EXPECT_EQ(book.disconnect(100), 3u);
+    EXPECT_EQ(book.order_count(), 0u);
+    EXPECT_EQ(book.bid_levels(), 0u);
+    EXPECT_EQ(book.ask_levels(), 0u);
+}
+
+TEST(OrderBookDisconnect, LeavesOtherClientsAlone)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+    book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 7);
+    book.add(3, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 9);
+
+    EXPECT_EQ(book.disconnect(100), 2u);
+
+    // client 200's order is still sitting there
+    EXPECT_EQ(book.order_count(), 1u);
+    EXPECT_NE(book.toString().find("10000 : 7"), std::string::npos);
+}
+
+TEST(OrderBookDisconnect, TwiceIsHarmless)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+
+    EXPECT_EQ(book.disconnect(100), 1u);
+    EXPECT_EQ(book.disconnect(100), 0u);
+    EXPECT_EQ(book.order_count(), 0u);
+}
+
+TEST(OrderBookDisconnect, CountTracksAddAndCancel)
+{
+    OrderBook book(10);
+
+    EXPECT_EQ(book.orders_for_client(100), 0u);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+    book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 9999, 5);
+    EXPECT_EQ(book.orders_for_client(100), 2u);
+
+    book.cancel(1);
+    EXPECT_EQ(book.orders_for_client(100), 1u);
+}
+
+TEST(OrderBookDisconnect, FilledOrderStopsCountingAgainstClient)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+    EXPECT_EQ(book.orders_for_client(100), 1u);
+
+    // someone eats the whole thing, so client 100 has nothing left
+    book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 5);
+
+    EXPECT_EQ(book.orders_for_client(100), 0u);
+    EXPECT_EQ(book.disconnect(100), 0u);
+}
+
+TEST(OrderBookDisconnect, PartiallyFilledOrderStillBelongsToClient)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 10);
+    book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 4);
+
+    // 6 still resting, so it must still come out on disconnect
+    EXPECT_EQ(book.orders_for_client(100), 1u);
+    EXPECT_EQ(book.disconnect(100), 1u);
+    EXPECT_EQ(book.order_count(), 0u);
+}
+
+TEST(OrderBookDisconnect, MarketOrderNeverCountsAgainstClient)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 3);
+
+    // market order takes 3 and throws away the other 7, never resting
+    book.add(2, 200, "AAPL", Side::BUY, OrderType::MARKET, 0, 10);
+
+    EXPECT_EQ(book.orders_for_client(200), 0u);
+}
+
+TEST(OrderBookDisconnect, SurvivesUpSize)
+{
+    OrderBook book(10);
+
+    book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 5);
+    book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10000, 7);
+
+    // up-size moves the list node, but ownership should not change
+    EXPECT_TRUE(book.update(1, 50));
+
+    EXPECT_EQ(book.orders_for_client(100), 2u);
+    EXPECT_EQ(book.disconnect(100), 2u);
+    EXPECT_EQ(book.order_count(), 0u);
+}
