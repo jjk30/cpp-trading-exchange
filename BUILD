@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 cc_library(
     name = "mem_pool",
@@ -54,5 +54,29 @@ cc_test(
     deps = [
         ":order_book",
         "@googletest//:gtest_main",
+    ],
+)
+cc_library(
+    name = "lf_queue",
+    hdrs = ["lf_queue.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "lf_queue_test",
+    srcs = ["lf_queue_test.cpp"],
+    deps = [
+        ":lf_queue",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "exchange_main",
+    srcs = ["exchange_main.cpp"],
+    deps = [
+        ":lf_queue",
+        ":order",
+        ":order_book",
     ],
 )
