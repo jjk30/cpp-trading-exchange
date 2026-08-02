@@ -87,3 +87,19 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+cc_library(
+    name = "md_book",
+    hdrs = ["md_book.h"],
+    deps = [":md_message"],
+    visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "md_book_test",
+    srcs = ["md_book_test.cpp"],
+    deps = [
+        ":md_book",
+        ":order_book",
+        "@googletest//:gtest_main",
+    ],
+)
