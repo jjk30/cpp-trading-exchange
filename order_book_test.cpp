@@ -146,7 +146,7 @@ namespace
         book.add(1, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10001, 5);
         EXPECT_FALSE(book.spread().has_value());
 
-        book.add(2, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+        book.add(2, 200, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
         ASSERT_TRUE(book.spread().has_value());
         EXPECT_EQ(book.spread().value(), 1);
     }
@@ -274,7 +274,6 @@ namespace
         EXPECT_EQ(trades[0].sell_order_id, 1u);
         EXPECT_EQ(trades[0].size, 5u);
 
-        // nothing left over on either side
         EXPECT_EQ(book.order_count(), 0u);
         EXPECT_EQ(book.ask_levels(), 0u);
         EXPECT_EQ(book.bid_levels(), 0u);
@@ -303,7 +302,6 @@ namespace
         ASSERT_EQ(trades.size(), 1u);
         EXPECT_EQ(trades[0].size, 4u);
 
-        // 6 still for sale, and the buyer is fully done
         EXPECT_EQ(book.order_count(), 1u);
         EXPECT_NE(book.toString().find("10002 : 6"), std::string::npos);
     }
@@ -318,7 +316,6 @@ namespace
         ASSERT_EQ(trades.size(), 1u);
         EXPECT_EQ(trades[0].size, 3u);
 
-        // seller gone, buyer's leftover 7 now waits as a bid
         EXPECT_EQ(book.ask_levels(), 0u);
         EXPECT_EQ(book.order_count(), 1u);
         ASSERT_TRUE(book.best_bid().has_value());
@@ -435,6 +432,103 @@ namespace
         // order 1 traded away completely, so the book should not know it
         EXPECT_FALSE(book.cancel(1));
         EXPECT_FALSE(book.update(1, 3));
+    }
+
+    TEST(OrderBookSelfTrade, EqualSizesKillEachOther)
+    {
+        OrderBook book(10);
+
+        // same client on both sides
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+        const auto trades = book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 5);
+
+        // no trade, but both orders are gone
+        EXPECT_TRUE(trades.empty());
+        EXPECT_EQ(book.order_count(), 0u);
+    }
+
+    TEST(OrderBookSelfTrade, BiggerRestingOrderKeepsRemainder)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 10);
+        const auto trades = book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 4);
+
+        EXPECT_TRUE(trades.empty());
+
+        // 4 killed off both, so 6 of the sell order survives
+        EXPECT_EQ(book.order_count(), 1u);
+        EXPECT_NE(book.toString().find("10002 : 6"), std::string::npos);
+    }
+
+    TEST(OrderBookSelfTrade, BiggerIncomingOrderKeepsRemainder)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 3);
+        const auto trades = book.add(2, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 10);
+
+        EXPECT_TRUE(trades.empty());
+
+        // seller wiped out, buyer's leftover 7 rests
+        EXPECT_EQ(book.ask_levels(), 0u);
+        EXPECT_EQ(book.order_count(), 1u);
+        EXPECT_NE(book.toString().find("10002 : 7"), std::string::npos);
+    }
+
+    TEST(OrderBookSelfTrade, DifferentClientsStillTrade)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+        const auto trades = book.add(2, 200, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 5);
+
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(book.order_count(), 0u);
+    }
+
+    TEST(OrderBookSelfTrade, SkipsOwnOrderThenTradesWithNext)
+    {
+        OrderBook book(10);
+
+        // my own order is first in line, someone else is behind it
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 4);
+        book.add(2, 200, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 6);
+
+        const auto trades = book.add(3, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 10);
+
+        // 4 vanished against my own order, the other 6 traded for real
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].sell_order_id, 2u);
+        EXPECT_EQ(trades[0].size, 6u);
+        EXPECT_EQ(book.order_count(), 0u);
+    }
+
+    TEST(OrderBookSelfTrade, PriceTimePriorityIsUnchanged)
+    {
+        OrderBook book(10);
+
+        // someone else is first in line, my own order is behind them
+        book.add(1, 200, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 3);
+        book.add(2, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 3);
+
+        const auto trades = book.add(3, 100, "AAPL", Side::BUY, OrderType::LIMIT, 10002, 6);
+
+        // the front of the queue still goes first, self trade or not
+        ASSERT_EQ(trades.size(), 1u);
+        EXPECT_EQ(trades[0].sell_order_id, 1u);
+        EXPECT_EQ(book.order_count(), 0u);
+    }
+
+    TEST(OrderBookSelfTrade, WorksForMarketOrdersToo)
+    {
+        OrderBook book(10);
+
+        book.add(1, 100, "AAPL", Side::SELL, OrderType::LIMIT, 10002, 5);
+        const auto trades = book.add(2, 100, "AAPL", Side::BUY, OrderType::MARKET, 0, 5);
+
+        EXPECT_TRUE(trades.empty());
+        EXPECT_EQ(book.order_count(), 0u);
     }
 
 } // namespace

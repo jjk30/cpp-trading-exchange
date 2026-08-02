@@ -20,7 +20,7 @@ bool OrderBook::crosses(Side side, int64_t incoming, int64_t resting)
     return incoming <= resting;
 }
 
-// A resting order got completely eaten. Clean up everything that points at it.
+// A resting order got completely used up. Clean up everything pointing at it.
 void OrderBook::remove_filled(Book &book,
                               Book::iterator level_it,
                               PriceLevel::iterator pos)
@@ -38,6 +38,7 @@ void OrderBook::remove_filled(Book &book,
 }
 
 void OrderBook::match(uint64_t incoming_id,
+                      uint64_t incoming_client,
                       Side side,
                       OrderType type,
                       int64_t price,
@@ -72,20 +73,31 @@ void OrderBook::match(uint64_t incoming_id,
             auto pos = level.begin();
             Order *resting = *pos;
 
-            // You can only trade as much as the smaller side is offering.
-            const uint64_t traded = std::min(remaining_size, resting->size());
+            // You can only touch as much as the smaller side is offering.
+            const uint64_t amount = std::min(remaining_size, resting->size());
 
-            // Write down what happened.
-            // Whichever side is buying goes in the buy slot.
-            trades.push_back(Trade{
-                (side == Side::BUY) ? incoming_id : resting->order_id(),
-                (side == Side::BUY) ? resting->order_id() : incoming_id,
-                resting_price,
-                traded});
+            // Same client on both sides. Letting this trade would be one
+            // person buying from themselves, which is not a real trade and
+            // in most markets is not allowed.
+            // So instead of trading, we kill the overlapping amount off both.
+            // Whichever order was bigger keeps its remainder and stays in play.
+            const bool self_trade = (resting->client_id() == incoming_client);
 
-            // Shrink both sides by the amount that just traded.
-            remaining_size -= traded;
-            resting->set_size(resting->size() - traded);
+            if (!self_trade)
+            {
+                // Write down what happened.
+                // Whichever side is buying goes in the buy slot.
+                trades.push_back(Trade{
+                    (side == Side::BUY) ? incoming_id : resting->order_id(),
+                    (side == Side::BUY) ? resting->order_id() : incoming_id,
+                    resting_price,
+                    amount});
+            }
+
+            // Both paths shrink both orders by the same amount.
+            // The only difference is whether a Trade was recorded.
+            remaining_size -= amount;
+            resting->set_size(resting->size() - amount);
 
             // Nothing left of the resting order, so it leaves the book.
             // If something is left, then our incoming order must be finished,
@@ -159,7 +171,7 @@ std::vector<Trade> OrderBook::add(uint64_t order_id,
 
     // Try to trade first. Only what survives this goes into the book.
     uint64_t remaining = size;
-    match(order_id, side, type, price, remaining, trades);
+    match(order_id, client_id, side, type, price, remaining, trades);
 
     // A market order says fill me now at any price. It never waits.
     // So anything it could not fill is simply thrown away.

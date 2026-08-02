@@ -86,9 +86,11 @@ private:
     };
 
     // Eat into the other side of the book while the prices still cross.
+    // Needs the client id so it can spot a client about to trade with itself.
     // remaining_size is passed by reference because this function shrinks it
     // as it fills, and add() needs to see what is left afterwards.
     void match(uint64_t incoming_id,
+               uint64_t incoming_client,
                Side side,
                OrderType type,
                int64_t price,
