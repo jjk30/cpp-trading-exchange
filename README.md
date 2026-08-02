@@ -2,7 +2,7 @@
 
 A trading exchange written from scratch in C++26, built over eight weeks for the Build Fellowship.
 
-Client threads send orders. One engine thread owns the book and matches them. Nothing locks the book.
+Client threads send orders. One engine thread owns the book and matches them. Nothing locks the book. Clients never read the book either — they rebuild their own copy from a market data feed.
 
 ## What is in here
 
@@ -12,9 +12,11 @@ Client threads send orders. One engine thread owns the book and matches them. No
 | `order.h` | One order: id, client, ticker, side, type, price, size. |
 | `trade.h` | What comes out when two orders match. |
 | `order_book.h` / `.cpp` | The book. Add, cancel, update, disconnect, TTL expiry, matching. |
-| `lf_queue.h` | Lock free queue. Many client threads push, one engine thread pops. No mutex. |
-| `exchange_main.cpp` | Runs it. Spins up client threads, waits for Ctrl+C. |
-| `mem_pool_test.cpp`, `order_test.cpp`, `order_book_test.cpp`, `lf_queue_test.cpp` | The tests. |
+| `lf_queue.h` | Lock free queue. Used both ways: many clients push orders in, and the engine pushes market data out. |
+| `md_message.h` | One market data event. Added, executed, or cancelled, with a sequence number. |
+| `md_book.h` | A client's own copy of the book, rebuilt from the feed alone. |
+| `exchange_main.cpp` | Runs it. Client threads, engine thread, market data, waits for Ctrl+C. |
+| `mem_pool_test.cpp`, `order_test.cpp`, `order_book_test.cpp`, `lf_queue_test.cpp`, `md_book_test.cpp` | The tests. |
 
 ## Run it
 
@@ -24,7 +26,7 @@ You need Bazel 8.5.1. Version 9 does not work with googletest yet, which is why 
 git clone https://github.com/jjk30/cpp-trading-exchange.git
 cd cpp-trading-exchange
 
-bazel test //...           # 83 tests
+bazel test //...           # 5 test targets
 bazel run //:exchange_main # Ctrl+C to stop
 ```
 
@@ -106,11 +108,42 @@ The queue is a ring of slots. Each slot carries an atomic sequence number that w
 
 Files: `lf_queue.h`, `lf_queue_test.cpp`, `exchange_main.cpp`
 
+## Step 5: Let clients see the market
+
+**What I did.** Made the exchange broadcast every change to the book, so a client can rebuild the book without ever reading it.
+
+**How.** Three message types, which is all Nasdaq's ITCH really needs:
+
+| Message | What the client does |
+|---|---|
+| Added | put the order in, at the back of that price's queue |
+| Executed | shrink that order. If it hits zero, drop it |
+| Cancelled | drop that order |
+
+The book now reports what it changed. Every mutating method takes an optional `std::vector<MDMessage>*`, and pushes onto it as it works. Pass nothing and no messages are made, so every existing caller and test kept compiling untouched.
+
+Order entry is one MPSC queue. Market data is one SPSC queue per client — same `LFQueue`, just one producer instead of many. Nobody shares a market data queue, so nobody contends for one.
+
+Every message carries a sequence number. If a client sees a number it did not expect, it knows it missed something and its book is now a guess, not a copy.
+
+**What it got me.** Four client threads, 77,406 requests, 52,154 trades, 111,842 market data messages. All four clients rebuilt an 8,235 order book byte for byte, with zero drops and zero gaps.
+
+Three decisions worth defending:
+
+- The engine uses `try_push`, never a blocking push. A slow subscriber loses a message and sees the gap in its sequence numbers. A matching engine that stalls because one client is slow is a broken exchange.
+- `emit` does not burn a sequence number when nobody is listening. Burning one would leave a phantom hole and make subscribers think they missed something.
+- Growing an order sends Cancelled then Added, not a modify message. The client does not need to know the queue priority rules — replaying those two lands the order exactly where the exchange put it.
+
+20 tests, which drive the real book through partial fills, sweeps, resizes, expiries and disconnects, then assert the rebuilt book prints identically.
+
+Files: `md_message.h`, `md_book.h`, `md_book_test.cpp`
+
 ## What is still missing
 
 - No latency numbers. Nothing here claims nanoseconds, and it should not until I have measured it.
 - No second implementation to compare against. A tick indexed array would be the obvious one.
 - The pool only covers the `Order` objects. `std::map` and `std::list` still allocate a node on every insert, so three of the four allocations per add are still there. That is the next real thing to fix.
+- No snapshot bootstrap. Every client here starts at sequence 1 and follows from the beginning. A client joining mid day would need to buffer the live feed, request a snapshot, and replay past it. Only the incremental half is built.
 
 ## Built with
 
