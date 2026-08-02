@@ -32,21 +32,19 @@ bazel run //:exchange_main # Ctrl+C to stop
 
 ## Step 1: Keep orders off the heap
 
-**What.** `MemPool<T>`, a fixed size memory pool.
+**What:** `MemPool<T>`, a fixed size memory pool.
 
-**How.** Ask the OS for one block at startup and never ask again. Free slots are a stack of indices, so handing one out or taking it back is a single push or pop. Objects are built in place with `std::construct_at`, torn down with `std::destroy_at`.
+**How:** Ask the OS for one block at startup and never ask again. Free slots are a stack of indices, so handing one out or taking it back is a single push or pop. Objects are built in place with `std::construct_at` and torn down with `std::destroy_at`.
 
-**Got me.** Adding an order never calls `new`. No allocator, no lock inside malloc, no pause in the middle of a match. Slots sit next to each other, so the cache helps.
-
-19 tests, including a 1000 round stress loop.
+**Results achieved:** Adding an order never calls `new`. No allocator, no lock inside malloc, no pause in the middle of a match. Slots sit next to each other, so the cache helps. 19 tests, including a 1000 round stress loop.
 
 Files: `mem_pool.h`
 
 ## Step 2: Build the order book
 
-**What.** `Order` and `OrderBook` with add, cancel, toString.
+**What:** `Order` and `OrderBook` with add, cancel, and toString.
 
-**How.** Three containers, because the book has two jobs that pull in different directions.
+**How:** Three containers, because the book has two jobs that pull in different directions.
 
 | Container | Job |
 |---|---|
@@ -56,17 +54,15 @@ Files: `mem_pool.h`
 
 Orders at the same price wait in a `std::list`, first in first filled. The id index stores an iterator pointing straight at the order, so cancel is one jump, not a scan.
 
-**Got me.** Both hot paths are constant time. List and not vector matters: erasing from the middle of a list is O(1) and does not invalidate the iterators either side of it, which is the only reason the stored iterator stays valid.
-
-11 tests.
+**Results achieved:** Both hot paths are constant time. List and not vector matters here: erasing from the middle of a list is O(1) and does not invalidate the iterators either side of it, which is the only reason the stored iterator stays valid. 11 tests.
 
 Files: `order.h`, `order_book.h`
 
 ## Step 3: Make it behave like a real venue
 
-**What.** Everything a book needs beyond add and cancel, plus a matching engine.
+**What:** Everything a book needs beyond add and cancel, plus a matching engine.
 
-**How.**
+**How:**
 
 | Feature | Behaviour |
 |---|---|
@@ -78,7 +74,7 @@ Files: `order.h`, `order_book.h`
 
 Then split the class into `order_book.h` and `order_book.cpp`, and measured coverage.
 
-**Got me.** 83 tests and coverage well past the 80 percent bar.
+**Results achieved:** 83 tests passing, and coverage well past the 80 percent bar.
 
 | Metric | Value |
 |---|---|
@@ -94,25 +90,23 @@ Files: `order_book.cpp`, `trade.h`
 
 ## Step 4: Let many clients in at once
 
-**What.** A lock free queue and a `main` that runs the whole exchange.
+**What:** A lock free queue and a `main` that runs the whole exchange.
 
-**How.** The obvious design is a mutex on the book. Clients block behind each other, one slow order stalls everybody, and a mutex is not fair, so submission order is lost.
+**How:** The obvious design is a mutex on the book. Clients block behind each other, one slow order stalls everybody, and a mutex is not fair, so submission order is lost.
 
 So clients never touch the book. They push a request into `LFQueue` and go back to work. One engine thread pops and applies.
 
 The queue is a ring of slots. Each slot holds an atomic sequence number that acts like a traffic light. A producer claims a slot with a compare and swap on the tail counter, writes into it, then flips the light green. The consumer only takes a slot whose light says it is its turn. Capacity is a power of two, so wrapping is a bitmask, not a modulo.
 
-**Got me.** Client latency is just the enqueue, so a slow match cannot stall anyone else. And the queue is FIFO by arrival, so execution order is fixed instead of whatever the scheduler felt like. A mutex gives you neither.
-
-11 tests.
+**Results achieved:** Client latency is just the enqueue, so a slow match cannot stall anyone else. The queue is FIFO by arrival, so execution order is fixed instead of whatever the scheduler felt like. A mutex gives you neither. 11 tests.
 
 Files: `lf_queue.h`, `exchange_main.cpp`
 
 ## Step 5: Let clients see the market
 
-**What.** The exchange broadcasts every change to the book, so a client can rebuild it without ever reading it.
+**What:** The exchange broadcasts every change to the book, so a client can rebuild it without ever reading it.
 
-**How.** Three message types, which is all Nasdaq's ITCH really needs.
+**How:** Three message types, which is all Nasdaq's ITCH really needs.
 
 | Message | What the client does |
 |---|---|
@@ -126,9 +120,9 @@ Order entry is one MPSC queue. Market data is one SPSC queue per client, same `L
 
 Every message carries a sequence number. A client that sees an unexpected number knows its book is now a guess, not a copy.
 
-**Got me.** A live run with four client threads.
+**Results achieved:** A live run with four client threads.
 
-| | |
+| Metric | Value |
 |---|---|
 | Requests | 77,406 |
 | Trades | 52,154 |
@@ -136,19 +130,16 @@ Every message carries a sequence number. A client that sees an unexpected number
 | Book rebuilt | 8,235 orders, all four clients, exact match |
 | Drops and gaps | 0 |
 
+20 tests, driving the real book through partial fills, sweeps, resizes, expiries and disconnects, then asserting the rebuilt book prints identically.
+
 Three decisions worth defending:
 
 - The engine uses `try_push`, never a blocking push. A slow subscriber loses a message and sees the gap in its sequence numbers. A matching engine that stalls because one client is slow is a broken exchange.
 - `emit` does not burn a sequence number when nobody is listening. That would leave a phantom hole and make subscribers think they missed something.
 - Growing an order sends Cancelled then Added, not a modify message. The client does not need to know the queue priority rules, replaying those two lands the order exactly where the exchange put it.
 
-20 tests, driving the real book through partial fills, sweeps, resizes, expiries and disconnects, then asserting the rebuilt book prints identically.
-
 Files: `md_message.h`, `md_book.h`
 
-## Next
-
-Latency benchmarking, a tick indexed book to compare against, and snapshot bootstrap so a client can join mid session.
 
 ## Built with
 
