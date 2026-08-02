@@ -3,6 +3,7 @@
 #include "mem_pool.h"
 #include "order.h"
 #include "trade.h"
+#include "md_message.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,7 @@ public:
     // market order, because market orders never wait.
     // ttl is how long the order may sit before it goes stale. 0 means forever.
     // Returns every trade that happened. Empty vector means nothing traded.
+    // md is where market data messages go. Pass nothing and none are made.
     std::vector<Trade> add(uint64_t order_id,
                            uint64_t client_id,
                            const std::string &ticker,
@@ -35,29 +37,31 @@ public:
                            int64_t price,
                            uint64_t size,
                            uint64_t timestamp = 0,
-                           uint64_t ttl = 0);
+                           uint64_t ttl = 0,
+                           std::vector<MDMessage> *md = nullptr);
 
     // Pull an order out of the book.
     // Returns false if we have never seen that id.
-    bool cancel(uint64_t order_id);
+    bool cancel(uint64_t order_id, std::vector<MDMessage> *md = nullptr);
 
     // Change how big an order is.
     // Making it smaller keeps your place in the queue.
     // Making it bigger sends you to the back of the queue.
     // Setting it to 0 is the same as cancelling.
-    bool update(uint64_t order_id, uint64_t new_size);
+    bool update(uint64_t order_id, uint64_t new_size,
+                std::vector<MDMessage> *md = nullptr);
 
     // A client dropped off. Pull every order they have out of the book.
     // If we left them in, the client would keep getting filled on orders
     // they can no longer see or cancel.
     // Returns how many orders were removed.
-    std::size_t disconnect(uint64_t client_id);
+    std::size_t disconnect(uint64_t client_id, std::vector<MDMessage> *md = nullptr);
 
     // Throw out every order whose deadline has passed by time now.
     // The book has no clock of its own, so the caller decides what now means.
     // That also makes this testable without waiting around.
     // Returns how many orders were removed.
-    std::size_t purge_expired(uint64_t now);
+    std::size_t purge_expired(uint64_t now, std::vector<MDMessage> *md = nullptr);
 
     // The soonest deadline in the whole book.
     // Nothing if no order has a deadline. A scheduler would use this to
@@ -118,7 +122,8 @@ private:
                OrderType type,
                int64_t price,
                uint64_t &remaining_size,
-               std::vector<Trade> &trades);
+               std::vector<Trade> &trades,
+               std::vector<MDMessage> *md);
 
     // Can these two prices trade with each other?
     static bool crosses(Side side, int64_t incoming, int64_t resting);
@@ -132,7 +137,8 @@ private:
               int64_t price,
               uint64_t size,
               uint64_t timestamp,
-              uint64_t ttl);
+              uint64_t ttl,
+              std::vector<MDMessage> *md);
 
     // Take a fully eaten resting order out of the book and give its
     // memory back to the pool.
@@ -147,6 +153,10 @@ private:
     // If nothing else dies at that moment, drop the moment too.
     void forget_expiry(const Order *order);
 
+    // Push one message onto the caller's vector. Does nothing if they did not ask.
+    void emit(std::vector<MDMessage> *md, MDType type, uint64_t order_id,
+              Side side, int64_t price, uint64_t size);
+
     static std::string level_to_string(int64_t price, const PriceLevel &level);
 
     // Where all Order objects actually live.
@@ -160,6 +170,9 @@ private:
     // Best bid is bids_.rbegin(), the priciest buyer, read from the back.
     Book bids_;
     Book asks_;
+
+    // Every market data message gets the next number so a client can spot a gap.
+    uint64_t md_seq_{0};
 
     // Order id to its Location.
     // This is the only reason cancel() is fast instead of a full scan.

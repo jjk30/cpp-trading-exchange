@@ -7,6 +7,29 @@ OrderBook::OrderBook(std::size_t capacity)
 {
 }
 
+// Put one message on the caller's pile.
+// Nobody asked for market data, so do nothing and do not burn a number.
+// Burning one would leave a hole in the feed and make clients think
+// they missed something.
+void OrderBook::emit(std::vector<MDMessage> *md, MDType type, uint64_t order_id,
+                     Side side, int64_t price, uint64_t size)
+{
+    if (md == nullptr)
+    {
+        return;
+    }
+
+    MDMessage m;
+    m.seq = ++md_seq_;
+    m.type = type;
+    m.order_id = order_id;
+    m.side = side;
+    m.price = price;
+    m.size = size;
+
+    md->push_back(m);
+}
+
 // Would these two prices agree on a trade?
 bool OrderBook::crosses(Side side, int64_t incoming, int64_t resting)
 {
@@ -91,10 +114,15 @@ void OrderBook::match(uint64_t incoming_id,
                       OrderType type,
                       int64_t price,
                       uint64_t &remaining_size,
-                      std::vector<Trade> &trades)
+                      std::vector<Trade> &trades,
+                      std::vector<MDMessage> *md)
 {
     // A buyer eats the sell side. A seller eats the buy side.
     Book &other = (side == Side::BUY) ? asks_ : bids_;
+
+    // Everything we announce here is about the resting order, which sits on
+    // the opposite side from whoever is coming in.
+    const Side resting_side = (side == Side::BUY) ? Side::SELL : Side::BUY;
 
     // Keep going until we run out of order to fill or run out of book to eat.
     while (remaining_size > 0 && !other.empty())
@@ -124,6 +152,10 @@ void OrderBook::match(uint64_t incoming_id,
             // You can only touch as much as the smaller side is offering.
             const uint64_t amount = std::min(remaining_size, resting->size());
 
+            // Grab the id now. If this order gets fully eaten below, the
+            // memory goes back to the pool and reading it after that is a bug.
+            const uint64_t resting_id = resting->order_id();
+
             // Same client on both sides. Letting this trade would be one
             // person buying from themselves, which is not a real trade and
             // in most markets is not allowed.
@@ -136,11 +168,18 @@ void OrderBook::match(uint64_t incoming_id,
                 // Write down what happened.
                 // Whichever side is buying goes in the buy slot.
                 trades.push_back(Trade{
-                    (side == Side::BUY) ? incoming_id : resting->order_id(),
-                    (side == Side::BUY) ? resting->order_id() : incoming_id,
+                    (side == Side::BUY) ? incoming_id : resting_id,
+                    (side == Side::BUY) ? resting_id : incoming_id,
                     resting_price,
                     amount});
             }
+
+            // Tell the world the resting order just got smaller.
+            // We send this in the self trade case too. No money changed hands,
+            // but the book still shrank, and a client copying our book has to
+            // shrink with it or it will drift out of step.
+            emit(md, MDType::Executed, resting_id, resting_side,
+                 resting_price, amount);
 
             // Both paths shrink both orders by the same amount.
             // The only difference is whether a Trade was recorded.
@@ -150,6 +189,8 @@ void OrderBook::match(uint64_t incoming_id,
             // Nothing left of the resting order, so it leaves the book.
             // If something is left, then our incoming order must be finished,
             // and the outer loop will stop on its own.
+            // No extra message needed. The client subtracts the same amount,
+            // hits zero, and drops the order on its own.
             if (resting->size() == 0)
             {
                 remove_filled(other, level_it, pos);
@@ -176,13 +217,15 @@ void OrderBook::rest(uint64_t order_id,
                      int64_t price,
                      uint64_t size,
                      uint64_t timestamp,
-                     uint64_t ttl)
+                     uint64_t ttl,
+                     std::vector<MDMessage> *md)
 {
     // Build the Order inside the pool. No call to new anywhere.
     Order *order = pool_.allocate(order_id, client_id, ticker,
                                   side, type, price, size, timestamp, ttl);
 
     // Pool is full. Drop the order rather than crash.
+    // Say nothing, because nothing went into the book.
     if (order == nullptr)
     {
         return;
@@ -208,6 +251,9 @@ void OrderBook::rest(uint64_t order_id,
     {
         expiry_[order->expires_at()].insert(order_id);
     }
+
+    // It is really in the book now, so it is safe to announce.
+    emit(md, MDType::Added, order_id, side, price, size);
 }
 
 std::vector<Trade> OrderBook::add(uint64_t order_id,
@@ -218,7 +264,8 @@ std::vector<Trade> OrderBook::add(uint64_t order_id,
                                   int64_t price,
                                   uint64_t size,
                                   uint64_t timestamp,
-                                  uint64_t ttl)
+                                  uint64_t ttl,
+                                  std::vector<MDMessage> *md)
 {
     std::vector<Trade> trades;
 
@@ -230,21 +277,23 @@ std::vector<Trade> OrderBook::add(uint64_t order_id,
     }
 
     // Try to trade first. Only what survives this goes into the book.
+    // The order of messages matters. Every execution goes out before the
+    // add does, because that is the order things actually happened in.
     uint64_t remaining = size;
-    match(order_id, client_id, side, type, price, remaining, trades);
+    match(order_id, client_id, side, type, price, remaining, trades, md);
 
     // A market order says fill me now at any price. It never waits.
     // So anything it could not fill is simply thrown away.
     if (remaining > 0 && type == OrderType::LIMIT)
     {
         rest(order_id, client_id, ticker, side, type, price,
-             remaining, timestamp, ttl);
+             remaining, timestamp, ttl, md);
     }
 
     return trades;
 }
 
-bool OrderBook::cancel(uint64_t order_id)
+bool OrderBook::cancel(uint64_t order_id, std::vector<MDMessage> *md)
 {
     // One hash lookup tells us exactly where the order is.
     auto it = index_.find(order_id);
@@ -261,6 +310,10 @@ bool OrderBook::cancel(uint64_t order_id)
 
     Order *order = *loc.pos;
 
+    // Copy these out before the entry disappears from the index.
+    const Side side = loc.side;
+    const int64_t price = loc.price;
+
     // Read what we need off the object before the memory goes back.
     forget_client_order(order->client_id(), order_id);
     forget_expiry(order);
@@ -275,10 +328,16 @@ bool OrderBook::cancel(uint64_t order_id)
     }
 
     index_.erase(it);
+
+    // Size is 0 because there is nothing left. The id alone tells a client
+    // what to throw away.
+    emit(md, MDType::Cancelled, order_id, side, price, 0);
+
     return true;
 }
 
-bool OrderBook::update(uint64_t order_id, uint64_t new_size)
+bool OrderBook::update(uint64_t order_id, uint64_t new_size,
+                       std::vector<MDMessage> *md)
 {
     auto it = index_.find(order_id);
     if (it == index_.end())
@@ -289,7 +348,7 @@ bool OrderBook::update(uint64_t order_id, uint64_t new_size)
     // Asking for zero means you want out. That is just a cancel.
     if (new_size == 0)
     {
-        return cancel(order_id);
+        return cancel(order_id, md);
     }
 
     Location &loc = it->second;
@@ -298,7 +357,19 @@ bool OrderBook::update(uint64_t order_id, uint64_t new_size)
     // Shrinking is free. You are asking for less, so you keep your place.
     if (new_size <= order->size())
     {
+        // Tell the world it got smaller by exactly this much.
+        // Executed is the right message here even though nothing traded,
+        // because it is the one message that shrinks an order without
+        // moving it, which is exactly what just happened.
+        const uint64_t reduced_by = order->size() - new_size;
+
         order->set_size(new_size);
+
+        if (reduced_by > 0)
+        {
+            emit(md, MDType::Executed, order_id, loc.side, loc.price, reduced_by);
+        }
+
         return true;
     }
 
@@ -317,10 +388,16 @@ bool OrderBook::update(uint64_t order_id, uint64_t new_size)
     // Forget this line and a later cancel() reads freed memory.
     loc.pos = std::prev(level.end());
 
+    // Two messages, because two things happened. It left its old spot and
+    // joined the back of the line. A client that replays these ends up with
+    // the order in the same place we just put it.
+    emit(md, MDType::Cancelled, order_id, loc.side, loc.price, 0);
+    emit(md, MDType::Added, order_id, loc.side, loc.price, new_size);
+
     return true;
 }
 
-std::size_t OrderBook::disconnect(uint64_t client_id)
+std::size_t OrderBook::disconnect(uint64_t client_id, std::vector<MDMessage> *md)
 {
     auto it = client_orders_.find(client_id);
     if (it == client_orders_.end())
@@ -336,7 +413,8 @@ std::size_t OrderBook::disconnect(uint64_t client_id)
     std::size_t removed = 0;
     for (const uint64_t id : ids)
     {
-        if (cancel(id))
+        // cancel() does the announcing for us, one message per order.
+        if (cancel(id, md))
         {
             ++removed;
         }
@@ -345,7 +423,7 @@ std::size_t OrderBook::disconnect(uint64_t client_id)
     return removed;
 }
 
-std::size_t OrderBook::purge_expired(uint64_t now)
+std::size_t OrderBook::purge_expired(uint64_t now, std::vector<MDMessage> *md)
 {
     // Gather first, delete after.
     // cancel() reaches into expiry_, so we must not be looping over it
@@ -367,7 +445,9 @@ std::size_t OrderBook::purge_expired(uint64_t now)
     std::size_t removed = 0;
     for (const uint64_t id : dead)
     {
-        if (cancel(id))
+        // An expired order looks exactly like a cancelled one from outside.
+        // The client does not need to know why it went away.
+        if (cancel(id, md))
         {
             ++removed;
         }

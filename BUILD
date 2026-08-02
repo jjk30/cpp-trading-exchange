@@ -36,17 +36,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "order_book",
-    srcs = ["order_book.cpp"],
-    hdrs = ["order_book.h"],
-    deps = [
-        ":mem_pool",
-        ":order",
-        ":trade",
-    ],
-    visibility = ["//visibility:public"],
-)
 
 cc_test(
     name = "order_book_test",
@@ -79,4 +68,22 @@ cc_binary(
         ":order",
         ":order_book",
     ],
+)
+cc_library(
+    name = "md_message",
+    hdrs = ["md_message.h"],
+    deps = [":order"],
+    visibility = ["//visibility:public"],
+)
+cc_library(
+    name = "order_book",
+    srcs = ["order_book.cpp"],
+    hdrs = ["order_book.h"],
+    deps = [
+        ":md_message",
+        ":mem_pool",
+        ":order",
+        ":trade",
+    ],
+    visibility = ["//visibility:public"],
 )
